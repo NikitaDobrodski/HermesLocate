@@ -32,7 +32,7 @@ if not os.path.exists(log_dir):
 logging.basicConfig(filename=os.path.join(log_dir, 'flight_log.log'), level=logging.INFO, format='%(asctime)s - %(message)s')
 
 # Параметры видео
-VIDEO_PATH = "/home/adam/Documents/HermesLocate/movies/output.mp4"  # Путь к видеофайлу
+VIDEO_PATH = "/home/adam/Documents/HermesLocate/movies/test.MP4"  # Путь к видеофайлу
 DESIRED_WIDTH = 480  # Желаемая ширина кадра
 DESIRED_HEIGHT = 360  # Желаемая высота кадра
 COORDINATE_INTERVAL = 1  # Интервал между вычислениями координат

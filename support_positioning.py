@@ -197,4 +197,3 @@ class SupportPositioning:
             tuple: Текущие координаты (x, y).
         """
         return self.x_coordinate, self.y_coordinate
-

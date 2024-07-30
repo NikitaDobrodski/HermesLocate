@@ -64,5 +64,3 @@ class SocketServer:
         self.running = False
         self.sock.close()
         print("Server stopped.")
-
-
