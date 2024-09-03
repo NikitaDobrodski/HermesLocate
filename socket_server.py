@@ -1,7 +1,6 @@
 """socket_server.py"""
 
 import socket
-import logging
 
 class SocketServer:
     def __init__(self, host, port):
@@ -11,36 +10,26 @@ class SocketServer:
         self.clients = set()
         self.running = True
 
-        logging.basicConfig(level=logging.INFO,
-                            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                            handlers=[
-                                logging.FileHandler("/home/adam/Documents/HermesLocate/logs/server.log"),
-                                logging.StreamHandler()
-                            ])
-
     def start(self):
         self.sock.bind((self.host, self.port))
-        logging.info(f"Server listening on {self.host}:{self.port}")
         print(f"Server listening on {self.host}:{self.port}")
 
         while self.running:
             try:
                 data, client_address = self.sock.recvfrom(1024)
                 if client_address not in self.clients:
-                    logging.info(f"New client connected: {client_address}")
                     print(f"New client connected: {client_address}")
                     self.clients.add(client_address)
-                logging.info(f"Received data from {client_address}: {data}")
                 print(f"Received data from {client_address}: {data.decode('utf-8')}")
             except Exception as e:
-                logging.error(f"Error receiving from client: {e}")
+                print(f"Error receiving from client: {e}")
 
     def receive_data(self):
         try:
             data, _ = self.sock.recvfrom(1024)
             return data.decode('utf-8')
         except Exception as e:
-            logging.error(f"Error receiving data: {e}")
+            print(f"Error receiving data: {e}")
             return None
 
     def send_coordinates(self, x, y):
@@ -52,7 +41,7 @@ class SocketServer:
             try:
                 self.sock.sendto(bytes(message, "utf-8"), client)
             except Exception as e:
-                logging.error(f"Error broadcasting to client {client}: {e}")
+                print(f"Error broadcasting to client {client}: {e}")
 
     def stop(self):
         self.running = False
