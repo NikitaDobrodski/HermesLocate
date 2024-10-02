@@ -5,6 +5,7 @@ from collections import deque
 from math import tan, radians, cos, sin
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
+import numpy as np  # Медиану будем считать через numpy
 
 def rotate_point(x, y, angle_degrees):
     """Вращает точку на заданный угол в градусах."""
@@ -19,7 +20,7 @@ class SupportPositioning:
         self.reference_frame = None
         self.reference_keypoints = None
         self.reference_descriptors = None
-        self.entries = deque(maxlen=100)  # Фиксированный размер буфера для координат
+        self.entries = deque(maxlen=250)  # Фиксированный размер буфера для координат
         self.orb = cv2.ORB_create()
         self.bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
         self.threshold_coefficient = threshold_coefficient
@@ -27,6 +28,10 @@ class SupportPositioning:
         self.executor = ThreadPoolExecutor(max_workers=2)
         self.lock = Lock()
         self.initialized = False
+
+        # Храним последние 15 смещений по X и Y для сглаживания
+        self.displacements_x = deque(maxlen=15)
+        self.displacements_y = deque(maxlen=15)
 
     def setup(self, image, x_start, y_start):
         """Настраивает эталонные ключевые точки и дескрипторы."""
@@ -42,7 +47,7 @@ class SupportPositioning:
             self.initialized = True
 
     def calculate_threshold_distance(self, image):
-        """Расчитывает пороговое расстояние для совпадений ключевых точек."""
+        """Рассчитывает пороговое расстояние для совпадений ключевых точек."""
         height, width = image.shape[:2]
         self.threshold_distance = self.threshold_coefficient * min(height, width)
 
@@ -79,54 +84,89 @@ class SupportPositioning:
         """Рассчитывает координаты на основе текущего кадра."""
         with self.lock:
             try:
-                if self.reference_keypoints is None or self.reference_descriptors is None:
+                if not self.initialized:
                     self.setup(image, x_start, y_start)
-                    if self.reference_keypoints is None or self.reference_descriptors is None:
-                        return self.x_coordinate, self.y_coordinate
 
-                current_frame = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-                current_keypoints, current_descriptors = self.orb.detectAndCompute(current_frame, None)
-
-                if self.reference_descriptors is None or current_descriptors is None:
+                if self.reference_keypoints is None or self.reference_descriptors is None:
                     return self.x_coordinate, self.y_coordinate
 
-                if self.reference_descriptors.shape[1] != current_descriptors.shape[1]:
+                current_frame_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+                current_keypoints, current_descriptors = self.orb.detectAndCompute(current_frame_gray, None)
+
+                # Проверка дескрипторов
+                if current_descriptors is None or self.reference_descriptors is None:
                     return self.x_coordinate, self.y_coordinate
 
                 matches = self.bf.match(self.reference_descriptors, current_descriptors)
                 good_matches = [m for m in matches if m.distance < self.threshold_distance]
 
-                if len(good_matches) == 0:
+                if not good_matches:
                     return self.x_coordinate, self.y_coordinate
 
-                displacement_x = sum(current_keypoints[m.trainIdx].pt[0] - self.reference_keypoints[m.queryIdx].pt[0] for m in good_matches) / len(good_matches)
-                displacement_y = sum(current_keypoints[m.trainIdx].pt[1] - self.reference_keypoints[m.queryIdx].pt[1] for m in good_matches) / len(good_matches)
+                # Используйте numpy для получения смещений
+                displacements = np.array([
+                    (
+                        current_keypoints[m.trainIdx].pt[0] - self.reference_keypoints[m.queryIdx].pt[0],
+                        current_keypoints[m.trainIdx].pt[1] - self.reference_keypoints[m.queryIdx].pt[1]
+                    ) for m in good_matches
+                ])
+
+                median_displacement = np.median(displacements, axis=0)
 
                 azim = self.get_azimuth()
                 alt = self.get_altitude()
                 fov = 42  # Поле зрения камеры в градусах
 
-                coordinate = self.calculate_coordinate_xy(azim, 100, fov, displacement_x, displacement_y, image.shape[1], image.shape[0])
+                coordinate = self.calculate_coordinate_xy(
+                    azim, 100, fov,
+                    median_displacement[0], median_displacement[1],
+                    image.shape[1], image.shape[0]
+                )
+
                 self.entries.append((coordinate[0], coordinate[1]))
-                self.executor.submit(self.update_reference_frame, current_frame, current_keypoints, current_descriptors)
+
+                # Обновляем ссылочный кадр в фоновом потоке, используя временной интервал
+                if self.should_update_reference():  # Условие для обновления
+                    self.executor.submit(self.update_reference_frame, current_frame_gray, current_keypoints, current_descriptors)
 
                 return coordinate[0], coordinate[1]
 
-            except Exception:
+            except Exception as e:
+                print(f"Error in calculate_coordinate: {e}")
                 return self.x_coordinate, self.y_coordinate
+
+    def should_update_reference(self):
+        """Определяет, нужно ли обновлять ссылочный кадр."""
+        # Логика для определения, когда следует обновить кадр
+        return len(self.entries) % 10 == 0  # Например, обновлять каждые 10 записей
 
     def calculate_coordinate_xy(self, azim, alt, fov, dx_pixels, dy_pixels, window_width, window_height):
         """Вычисляет координаты на основе смещения в пикселях и параметров камеры."""
         try:
-            tan_half_fov = abs(alt * tan(radians(fov)))
-            dx_metres = (2 * tan_half_fov) / window_width
-            dy_metres = (2 * tan_half_fov) / window_height
-            x_distance = dx_pixels * dx_metres
-            y_distance = dy_pixels * dx_metres
+            # Вычисляем полуширину поля зрения в градусах
+            tan_half_fov = abs(tan(radians(fov / 2)))
+            
+            # Примерный коэффициент для перевода пикселей в метры
+            meters_per_pixel_x = (tan_half_fov * alt) / (window_width / 2)
+            meters_per_pixel_y = (tan_half_fov * alt) / (window_height / 2)
 
-            rotate = rotate_point(x_distance, y_distance, azim)
-            self.x_coordinate += rotate[1]
-            self.y_coordinate -= rotate[0]
+            # 1 градус широты ≈ 111.32 км
+            lat_per_meter = 1 / 111320.0
+
+            # 1 градус долготы ≈ 111.32 км * cos(широта)
+            lon_per_meter = 1 / (111320.0 * cos(radians(self.x_coordinate)))
+
+            # Преобразуем смещения из пикселей в градусы
+            delta_lat = dy_pixels * meters_per_pixel_y * lat_per_meter
+            delta_lon = dx_pixels * meters_per_pixel_x * lon_per_meter
+
+            # Применяем поворот по азимуту
+            rotated = rotate_point(delta_lon, delta_lat, azim)
+
+            # Обновляем координаты
+            self.x_coordinate += rotated[1]  # Широта
+            self.y_coordinate += rotated[0]  # Долгота
+
             return self.x_coordinate, self.y_coordinate
         except Exception:
             return self.x_coordinate, self.y_coordinate
@@ -154,4 +194,3 @@ class SupportPositioning:
             return coordinate
         except Exception:
             return None
-

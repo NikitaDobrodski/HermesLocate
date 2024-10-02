@@ -1,4 +1,6 @@
 aiogrpc==1.8
+altgraph==0.17.4
+certifi==2024.7.4
 contourpy==1.2.1
 cycler==0.12.1
 filterpy==1.4.5
@@ -18,10 +20,15 @@ packaging==24.1
 pillow==10.4.0
 progress==1.6
 protobuf==3.20.1
+psutil==6.0.0
+pyinstaller==6.10.0
+pyinstaller-hooks-contrib==2024.8
 pymavlink==2.4.41
 pyparsing==3.1.2
+pyproj==3.6.1
 pyserial==3.5
 python-dateutil==2.9.0.post0
 scipy==1.14.0
+setuptools==74.1.0
 six==1.16.0
 vidstab==1.7.4

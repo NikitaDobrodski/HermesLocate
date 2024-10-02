@@ -26,15 +26,11 @@ class SocketServer:
 
     def receive_data(self):
         try:
-            data, _ = self.sock.recvfrom(1024)
-            return data.decode('utf-8')
+            data, client_address = self.sock.recvfrom(1024)  # Get both data and address
+            return data.decode('utf-8'), client_address  # Return both values
         except Exception as e:
             print(f"Error receiving data: {e}")
-            return None
-
-    def send_coordinates(self, x, y):
-        message = f"{x:.6f} {y:.6f}"
-        self.send_message(message)
+            return None, None  # Return None for both if there's an error
 
     def send_message(self, message):
         for client in self.clients:

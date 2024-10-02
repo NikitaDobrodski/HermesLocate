@@ -1,124 +1,120 @@
-"""main_video.py"""
+# main_video.py
 
 #!/usr/bin/python3
 
 import cv2
-import queue
 import time
-from threading import Thread, Event, Lock
+import threading
+from multiprocessing import Process, Queue, Event
 from pymavlink import mavutil
 import os
-import tracemalloc
 import signal
 import sys
 from socket_server import SocketServer
 from support_positioning import SupportPositioning
 
+# Устанавливаем платформу для Qt
 os.environ["QT_QPA_PLATFORM"] = "xcb"
 
 def signal_handler(sig, frame):
     print("Signal received, stopping...")
     stop_event.set()
-    video_processor.cleanup_threads()
+    video_processor.cleanup_processes()
     sys.exit(0)
 
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
 
 VIDEO_PATH = "rtsp://adam:1984@192.168.144.26:8554/main.264"
-DESIRED_WIDTH = 480
-DESIRED_HEIGHT = 360
-COORDINATE_INTERVAL = 5
-FPS = 30
+DESIRED_WIDTH = 640
+DESIRED_HEIGHT = 480
+COORDINATE_INTERVAL = 3
+FPS = 30  # Уменьшение FPS для уменьшения нагрузки на процессор
 
 socket_server = SocketServer('192.168.144.5', 5008)
 
-tracemalloc.start()
-
+# Функция для запуска сервера
 def start_server():
     socket_server.start()
 
-server_thread = Thread(target=start_server, daemon=True)
-server_thread.start()
-
 stop_event = Event()
-frame_queue = queue.Queue(maxsize=10)
+frame_queue = Queue(maxsize=10)  # Уменьшен размер очереди
 
-def read_frames(video_path, frame_queue, stop_event):
-    stream = cv2.VideoCapture(video_path)
-    
-    if not stream.isOpened():
-        print("Error: Unable to open video stream.")
-        stop_event.set()
-        return
-
-    try:
-        while not stop_event.is_set():
-            ret, frame = stream.read()
-            if not ret:
-                print("Error: Unable to read frame.")
-                break
-
-            frame = cv2.resize(frame, (DESIRED_WIDTH, DESIRED_HEIGHT))
-
-            if frame_queue.full():
-                # Remove oldest frame to make space for new frame
-                frame_queue.get()
-
-            frame_queue.put(frame)
-
-    except Exception as e:
-        print(f"Error reading frames: {e}")
-    finally:
-        stream.release()
-
-def display_frames(frame_queue, stop_event):
-    try:
-        while not stop_event.is_set():
-            if not frame_queue.empty():
-                frame = frame_queue.get()
-                cv2.imshow('Video Stream', frame)
-                if cv2.waitKey(1) & 0xFF == ord('q'):
-                    stop_event.set()
-                    break
-            time.sleep(0.01)
-    except Exception as e:
-        print(f"Error displaying frames: {e}")
-    finally:
-        cv2.destroyAllWindows()
-
-class VideoProcessor:
-    def __init__(self, frame_queue):
+class VideoReader:
+    def __init__(self, video_path, frame_queue, stop_event, stream):
+        self.video_path = video_path
         self.frame_queue = frame_queue
         self.stop_event = stop_event
-        self.thread_processing = None
+        self.stream_aw = stream
+        self.last_frame = None
+        self.fps_control_interval = 1 / FPS
+        self.last_frame_time = time.perf_counter()
+
+class GpsController:
+    def __init__(self, master):
+        self.master = master
+
+    def send_gps_to_controller(self, lat, lon, satellites=55):
+        try:
+            lat_mavlink = int(lat * 1e7)
+            lon_mavlink = int(lon * 1e7)
+
+            self.master.mav.gps_input_send(
+                int(time.time() * 1e6),
+                0,
+                0,
+                0,
+                0,
+                3,
+                lat_mavlink,
+                lon_mavlink,
+                0,
+                0.7,
+                1.0,
+                0,
+                0,
+                0,
+                0.1,
+                0.5,
+                0.5,
+                satellites,
+                0
+            )
+            print(f"GPS данные отправлены: lat={lat}, lon={lon}")
+        except Exception as e:
+            print(f"Ошибка при отправке данных на MAVLink: {e}")
+
+class VideoProcessor:
+    def __init__(self, frame_queue, socket_server):
+        self.frame_queue = frame_queue
+        self.socket_server = socket_server
+        self.stop_event = stop_event
+        self.processed_frames = 0
         self.master = self.initialize_mavlink()
+        self.gps_controller = GpsController(self.master)  # Use GpsController
         self.initial_coordinates = self.get_initial_coordinates()
         self.support_positioning = SupportPositioning(self.master)
-        self.processed_frames = 0
 
     def initialize_mavlink(self):
         try:
             master = mavutil.mavlink_connection('/dev/ttyAMA0', baud=115200)
+            master.wait_heartbeat()
+            print("Соединение с MAVLink установлено.")
             return master
         except Exception as e:
-            print(f"Error initializing MAVLink: {e}")
+            print(f"Ошибка при подключении MAVLink: {e}")
             sys.exit(1)
 
     def get_initial_coordinates(self):
         while True:
-            data = socket_server.receive_data()
+            data, client_address = socket_server.receive_data()
             if data:
                 try:
                     x_start, y_start = map(float, data.split(','))
                     return x_start, y_start
                 except ValueError:
-                    print("Error parsing coordinates.")
+                    print("Ошибка при парсинге координат.")
                     continue
-
-    def start_processing_thread(self):
-        self.thread_processing = Thread(target=self.start_processing, daemon=True)
-        self.thread_processing.start()
 
     def start_processing(self):
         try:
@@ -130,51 +126,61 @@ class VideoProcessor:
                     frame = self.frame_queue.get()
                     self.processed_frames += 1
 
-                    frame_start_time = time.perf_counter()
-
                     if self.processed_frames % COORDINATE_INTERVAL == 0:
                         coordinate = self.support_positioning.calculate_coordinate(frame, initial_x, initial_y)
-                        socket_server.send_coordinates(*coordinate)
+                        latitude, longitude = coordinate
 
-                    frame_end_time = time.perf_counter()
-                    processing_time = frame_end_time - frame_start_time
+                        # Use GpsController to send the GPS data
+                        self.gps_controller.send_gps_to_controller(latitude, longitude)
 
-                    time.sleep(1 / FPS)
+                    time.sleep(0.3)
         except Exception as e:
-            print(f"Error processing frames: {e}")
-        finally:
-            self.stop_event.set()
+            print(f"Ошибка в процессе обработки видео: {e}")
 
-    def cleanup_threads(self):
-        if self.thread_processing:
-            self.thread_processing.join(timeout=1)
-        cv2.destroyAllWindows()
+    def cleanup_processes(self):
+        pass
 
+# Главная часть программы
 if __name__ == "__main__":
-    lock = Lock()
+    frame_queue = Queue()
+    stream = cv2.VideoCapture(VIDEO_PATH)  # Подключение к камере, можно указать URL камеры
 
-    # Start reading frames from RTSP stream in a separate thread
-    reading_thread = Thread(target=read_frames, args=(VIDEO_PATH, frame_queue, stop_event), daemon=True)
-    reading_thread.start()
-
-    # Start displaying frames in a separate thread
-    display_thread = Thread(target=display_frames, args=(frame_queue, stop_event), daemon=True)
-    display_thread.start()
-
-    video_processor = VideoProcessor(frame_queue)
-    video_processor.start_processing_thread()
+    # Запускаем сервер в отдельном процессе
+    server_process = Process(target=start_server)
+    server_process.start()
 
     try:
-        while not stop_event.is_set():
-            time.sleep(1)
+        while True:
+            # Чтение кадра из потока
+            ret, frame = stream.read()
+            if not ret:
+                print("Failed to grab frame.")
+                break
+
+            # Изменение размера кадра
+            height, width, _ = frame.shape
+            frame = cv2.resize(frame, (width // 2, height // 2))
+
+            # Показ видео
+            cv2.imshow("Video1", frame)
+
+            # Добавление кадра в очередь
+            frame_queue.put(frame)
+
+            # Выход по нажатию клавиши 'x'
+            if cv2.waitKey(1) & 0xFF == ord('x'):
+                break
+    except Exception as e:
+        print("ERROR:", e)
     finally:
-        stop_event.set()
-        video_processor.cleanup_threads()
-        reading_thread.join(timeout=1)
-        display_thread.join(timeout=1)
+        stream.release()
+        cv2.destroyAllWindows()
+        
+    # Запускаем процессор видео в отдельном процессе
+    video_processor = VideoProcessor(frame_queue, server_process)
+    video_processor_process = Process(target=video_processor.start_processing)
+    video_processor_process.start()
 
-    snapshot = tracemalloc.take_snapshot()
-    top_stats = snapshot.statistics('lineno')
-
-    for stat in top_stats[:10]:
-        print(stat)
+    # Ожидание завершения всех процессов
+    video_processor_process.join()
+    server_process.join()
